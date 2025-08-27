@@ -80,23 +80,36 @@ HTML_TEMPLATE = """
 # ==== DATA FUNCTIONS ====
 
 def get_links_with_meta():
-    """Fetch JSON and return list of dicts with dept, title, lang, url."""
-    resp = requests.get(EFORM_URL, timeout=TIMEOUT)
-    resp.raise_for_status()
-    forms = resp.json()
+    # Try up to 3 times before giving up
+    for attempt in range(3):
+        try:
+            print(f"Fetching forms, attempt {attempt+1}...")
+            resp = requests.get(EFORM_URL, timeout=15)
+            resp.raise_for_status()
+            forms = resp.json()  # Will raise ValueError if invalid
+            if not isinstance(forms, list) or not forms:
+                raise ValueError("Empty or invalid JSON structure")
+            break
+        except requests.exceptions.Timeout:
+            print("⚠ Timeout when fetching data.")
+        except requests.exceptions.RequestException as e:
+            print(f"⚠ Request error: {e}")
+        except ValueError as ve:
+            print(f"⚠ JSON parse error: {ve}")
+        time.sleep(2)
+    else:
+        # All attempts failed
+        print("❌ All attempts to fetch forms failed. Returning empty list.")
+        return []
 
     records = []
     for form in forms:
-        # Department/title priority: en > tc > sc
         if form.get("en_department") and form.get("en_title"):
-            dept = form["en_department"].strip()
-            title = form["en_title"].strip()
+            dept, title = form["en_department"].strip(), form["en_title"].strip()
         elif form.get("tc_department") and form.get("tc_title"):
-            dept = form["tc_department"].strip()
-            title = form["tc_title"].strip()
+            dept, title = form["tc_department"].strip(), form["tc_title"].strip()
         else:
-            dept = form.get("sc_department", "").strip()
-            title = form.get("sc_title", "").strip()
+            dept, title = form.get("sc_department", "").strip(), form.get("sc_title", "").strip()
 
         for lang in ("en", "tc", "sc"):
             url_key = f"{lang}_url"
@@ -109,6 +122,7 @@ def get_links_with_meta():
                 })
     return records
 
+
 def check_link(url):
     try:
         r = requests.head(url, allow_redirects=True, timeout=TIMEOUT)
@@ -120,6 +134,10 @@ def check_link(url):
 
 def run_check(auto=False):
     records = get_links_with_meta()
+    if not records:
+        print("⚠ No new records fetched; preserving previous data.")
+        return json.load(open(JSON_FILE))["results"] if os.path.exists(JSON_FILE) else []
+    
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     history = {}
