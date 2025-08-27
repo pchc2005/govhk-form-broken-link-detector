@@ -5,14 +5,20 @@ from datetime import datetime
 import pandas as pd
 import os
 import json
+import threading
+import time
 
+# ==== CONFIG ====
 EFORM_URL = "https://www.iamsmart.gov.hk/data/eform.txt"
-TIMEOUT = 5
+TIMEOUT = 15
 CSV_FILE = "link_history.csv"
 JSON_FILE = "history.json"
+AUTO_REFRESH_INTERVAL = 900  # seconds (15 min)
+MAX_WORKERS = 10
 
 app = Flask(__name__)
 
+# ==== HTML TEMPLATE ====
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -25,7 +31,10 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-4">
     <h1>Government e-Form Link Status</h1>
-    <p>Last checked: {{ last_checked }}</p>
+    <p>Last checked: {{ last_checked or 'N/A' }}</p>
+    {% if last_auto_refresh %}
+    <p>Last auto-refresh: {{ last_auto_refresh }}</p>
+    {% endif %}
     <a href="{{ url_for('refresh') }}" class="btn btn-primary mb-3">🔄 Refresh</a>
     <a href="{{ url_for('download_csv') }}" class="btn btn-success mb-3">⬇ Export All (CSV)</a>
     <a href="{{ url_for('download_errors') }}" class="btn btn-danger mb-3">⬇ Export Errors Only</a>
@@ -60,7 +69,7 @@ HTML_TEMPLATE = """
     <script>
         $(document).ready(function() {
             $('#linkTable').DataTable({
-                "order": [[5, "asc"]] // Sort by Status column (index 5)
+                "order": [[5, "asc"]]
             });
         });
     </script>
@@ -68,8 +77,10 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ==== DATA FUNCTIONS ====
+
 def get_links_with_meta():
-    """Fetch JSON and return list of dicts with department, title, lang, url."""
+    """Fetch JSON and return list of dicts with dept, title, lang, url."""
     resp = requests.get(EFORM_URL, timeout=TIMEOUT)
     resp.raise_for_status()
     forms = resp.json()
@@ -87,7 +98,6 @@ def get_links_with_meta():
             dept = form.get("sc_department", "").strip()
             title = form.get("sc_title", "").strip()
 
-        # Add all language URLs for checking
         for lang in ("en", "tc", "sc"):
             url_key = f"{lang}_url"
             if form.get(url_key):
@@ -108,27 +118,29 @@ def check_link(url):
     except requests.RequestException:
         return "Broken"
 
-def run_check():
+def run_check(auto=False):
     records = get_links_with_meta()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    history = []
+    history = {}
     if os.path.exists(JSON_FILE):
         with open(JSON_FILE, 'r', encoding='utf-8') as f:
             history = json.load(f)
+            if not isinstance(history, dict):
+                history = {}
+
+    old_results = history.get("results", [])
 
     results = []
-    with ThreadPoolExecutor(max_workers=20) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         statuses = list(executor.map(lambda rec: check_link(rec["url"]), records))
 
     for rec, status in zip(records, statuses):
         first_broken = None
         if status != "OK":
-            prev = next((h for h in history if h["url"] == rec["url"] and h["status"] != "OK"), None)
-            if prev and prev.get("first_broken"):
-                first_broken = prev["first_broken"]
-            else:
-                first_broken = now
+            prev = next((h for h in old_results if h["url"] == rec["url"] and h["status"] != "OK"), None)
+            first_broken = prev["first_broken"] if prev and prev.get("first_broken") else now
+
         results.append({
             "department": rec["department"],
             "title": rec["title"],
@@ -138,45 +150,82 @@ def run_check():
             "first_broken": first_broken
         })
 
-    # Sort errors first
     status_order = {'Error': 0, 'Broken': 0, 'OK': 1}
     results.sort(key=lambda r: (status_order.get(r["status"].split()[0], 1), r["department"], r["title"]))
 
-    # Save JSON (main history) and CSV (reporting)
-    with open(JSON_FILE, 'w', encoding='utf-8') as f:
-        json.dump(results, f, ensure_ascii=False, indent=2)
-    pd.DataFrame(results).to_csv(CSV_FILE, index=False)
+    data = {
+        "results": results,
+        "last_checked": now
+    }
+    if auto:
+        data["last_auto_refresh"] = now
+    elif "last_auto_refresh" in history:
+        data["last_auto_refresh"] = history["last_auto_refresh"]
 
+    with open(JSON_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+    pd.DataFrame(results).to_csv(CSV_FILE, index=False)
     return results
 
+def background_check():
+    threading.Thread(target=run_check, kwargs={"auto": False}, daemon=True).start()
+
+def background_scheduler():
+    while True:
+        try:
+            print(f"[Scheduler] Auto-refresh at {datetime.now()}")
+            run_check(auto=True)
+        except Exception as e:
+            print(f"[Scheduler] Error: {e}")
+        time.sleep(AUTO_REFRESH_INTERVAL)
+
+# Start scheduler on app init
+threading.Thread(target=background_scheduler, daemon=True).start()
+
+# ==== ROUTES ====
 @app.route("/")
 def index():
     if not os.path.exists(JSON_FILE):
-        results = run_check()
+        background_check()
+        results = []
+        last_checked = None
+        last_auto_refresh = None
     else:
         with open(JSON_FILE, 'r', encoding='utf-8') as f:
-            results = json.load(f)
-    return render_template_string(HTML_TEMPLATE, results=results, last_checked=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            data = json.load(f)
+        results = data.get("results", [])
+        last_checked = data.get("last_checked")
+        last_auto_refresh = data.get("last_auto_refresh")
+
+    return render_template_string(
+        HTML_TEMPLATE,
+        results=results,
+        last_checked=last_checked,
+        last_auto_refresh=last_auto_refresh
+    )
 
 @app.route("/refresh")
 def refresh():
-    run_check()
+    background_check()
     return redirect(url_for('index'))
 
 @app.route("/download_csv")
 def download_csv():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    export_name = f"link_history_{timestamp}.csv"
-    return send_file(CSV_FILE, as_attachment=True, download_name=export_name)
+    return send_file(CSV_FILE, as_attachment=True, download_name=f"link_history_{timestamp}.csv")
 
 @app.route("/download_errors")
 def download_errors():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    errors_file = f"errors_only_{timestamp}.csv"
     df = pd.read_csv(CSV_FILE)
     errors = df[df['status'] != 'OK']
+    errors_file = f"errors_only_{timestamp}.csv"
     errors.to_csv(errors_file, index=False)
-    return send_file(errors_file, as_attachment=True, download_name=errors_file)
+    return send_file(errors_file, as_attachment=True)
 
+# ==== ENTRYPOINT ====
 if __name__ == "__main__":
-    app.run(debug=True)
+    # app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=True)
