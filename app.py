@@ -13,8 +13,11 @@ EFORM_URL = "https://www.iamsmart.gov.hk/data/eform.txt"
 TIMEOUT = 15
 CSV_FILE = "link_history.csv"
 JSON_FILE = "history.json"
-AUTO_REFRESH_INTERVAL = 900  # seconds (15 min)
+AUTO_REFRESH_INTERVAL = 3600  # 1 hour in seconds
 MAX_WORKERS = 10
+
+SELF_PING_INTERVAL = 600  # seconds (10 minutes)
+SELF_URL = os.environ.get("SELF_URL")  # set in Render dashboard
 
 app = Flask(__name__)
 
@@ -197,9 +200,25 @@ def background_scheduler():
         except Exception as e:
             print(f"[Scheduler] Error: {e}")
         time.sleep(AUTO_REFRESH_INTERVAL)
+        
+def self_pinger():
+    """Periodically call the app's own URL to keep Render awake."""
+    if not SELF_URL:
+        print("No SELF_URL set — self-pinger disabled.")
+        return
+    # Small delay so we don't ping before the app is ready
+    time.sleep(30)
+    while True:
+        try:
+            print(f"[Self‑Pinger] Pinging {SELF_URL} at {datetime.now()}")
+            requests.get(SELF_URL, timeout=10)
+        except Exception as e:
+            print(f"[Self‑Pinger] Error: {e}")
+        time.sleep(SELF_PING_INTERVAL)
 
 # Start scheduler on app init
 threading.Thread(target=background_scheduler, daemon=True).start()
+threading.Thread(target=self_pinger, daemon=True).start()
 
 # ==== ROUTES ====
 @app.route("/")
