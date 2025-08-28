@@ -1,12 +1,14 @@
-from flask import Flask, render_template_string, send_file, redirect, url_for
+from flask import Flask, render_template_string, send_file, redirect, url_for, jsonify, Response
 import requests
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pandas as pd
 import os
 import json
 import threading
 import time
+import queue
+import functools
+from threading import Lock
 
 # ==== CONFIG ====
 EFORM_URL = "https://www.iamsmart.gov.hk/data/eform.txt"
@@ -21,6 +23,44 @@ SELF_URL = os.environ.get("SELF_URL")  # set in Render dashboard
 
 app = Flask(__name__)
 
+# Progress and locking mechanism
+check_lock = Lock()
+progress_queue = queue.Queue()
+is_checking = False
+
+# Global progress tracking
+progress_status = {
+    "state": "idle",  # idle, fetching, checking, complete
+    "message": "",
+    "current": 0,
+    "total": 0,
+    "current_item": ""
+}
+
+def with_check_lock(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        global is_checking
+        if not check_lock.acquire(blocking=False):
+            return jsonify({"error": "Another check is in progress"}), 409
+        is_checking = True
+        try:
+            return f(*args, **kwargs)
+        finally:
+            is_checking = False
+            check_lock.release()
+    return wrapper
+
+def update_progress(state, message="", current=0, total=0, current_item=""):
+    progress_data = {
+        "state": state,
+        "message": message,
+        "current": current,
+        "total": total,
+        "current_item": current_item
+    }
+    progress_queue.put(progress_data)
+
 # ==== HTML TEMPLATE ====
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -31,9 +71,64 @@ HTML_TEMPLATE = """
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+    <style>
+        .overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+        .progress-popup {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 80%;
+            max-width: 600px;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+            z-index: 1001;
+        }
+        .timestamp-info {
+            position: absolute;
+            top: 10px;
+            right: 20px;
+            text-align: right;
+            font-size: 0.85rem;
+            color: #666;
+        }
+    </style>
 </head>
 <body class="p-4">
+    <!-- Progress Overlay -->
+    <div id="progressSection" class="overlay">
+        <div class="progress-popup">
+            <h4 id="progressState">Status: <span id="progressStateText">Idle</span></h4>
+            <p id="progressMessage"></p>
+            <div class="progress">
+                <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
+                     role="progressbar" style="width: 0%"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Timestamp Info -->
+    <div class="timestamp-info">
+        <div>Last checked: {{ last_checked or 'N/A' }}</div>
+        {% if last_auto_refresh %}
+        <div>Last auto-refresh: {{ last_auto_refresh }}</div>
+        {% endif %}
+    </div>
+
     <h1>Government e-Form Link Status</h1>
+    
+    <!-- Status Cards -->
     <div class="row mb-3">
         <div class="col-sm">
             <div class="card border-success mb-3">
@@ -60,10 +155,6 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
-    <p>Last checked: {{ last_checked or 'N/A' }}</p>
-    {% if last_auto_refresh %}
-    <p>Last auto-refresh: {{ last_auto_refresh }}</p>
-    {% endif %}
     <a href="{{ url_for('refresh') }}" class="btn btn-primary mb-3">🔄 Refresh</a>
     <a href="{{ url_for('download_csv') }}" class="btn btn-success mb-3">⬇ Export All (CSV)</a>
     <a href="{{ url_for('download_errors') }}" class="btn btn-danger mb-3">⬇ Export Errors Only</a>
@@ -100,6 +191,54 @@ HTML_TEMPLATE = """
             $('#linkTable').DataTable({
                 "order": [[5, "asc"]]
             });
+            
+            let eventSource;
+            
+            function startEventSource() {
+                eventSource = new EventSource('/progress-stream');
+                
+                eventSource.onmessage = function(event) {
+                    const data = JSON.parse(event.data);
+                    if (data.state !== 'idle') {
+                        $('#progressSection').show();
+                        $('#progressStateText').text(data.state);
+                        $('#progressMessage').text(data.message);
+                        if (data.total > 0) {
+                            let percentage = (data.current / data.total) * 100;
+                            $('#progressBar').css('width', percentage + '%');
+                        }
+                    }
+                    
+                    if (data.state === 'complete') {
+                        eventSource.close();
+                        location.reload();
+                    }
+                };
+                
+                eventSource.onerror = function() {
+                    eventSource.close();
+                    $('#progressSection').hide();
+                };
+            }
+            
+            // Start progress tracking when refresh is clicked
+            $('a[href="/refresh"]').click(function(e) {
+                e.preventDefault();
+                $('#progressSection').show();
+                $.ajax({
+                    url: $(this).attr('href'),
+                    method: 'GET',
+                    success: function() {
+                        startEventSource();
+                    },
+                    error: function(xhr) {
+                        if (xhr.status === 409) {
+                            alert('Another check is currently in progress');
+                            $('#progressSection').hide();
+                        }
+                    }
+                });
+            });
         });
     </script>
 </body>
@@ -109,6 +248,7 @@ HTML_TEMPLATE = """
 # ==== DATA FUNCTIONS ====
 
 def get_links_with_meta():
+    update_progress("fetching", "Fetching forms data...")
     # Try up to 3 times before giving up
     for attempt in range(3):
         try:
@@ -152,7 +292,8 @@ def get_links_with_meta():
     return records
 
 
-def check_link(url):
+def check_link(url, index, total, department, title, lang):
+    update_progress("checking", f"Checking {department} - {title} ({lang})", index, total)
     try:
         r = requests.head(url, allow_redirects=True, timeout=TIMEOUT)
         if r.status_code >= 400:
@@ -161,10 +302,12 @@ def check_link(url):
     except requests.RequestException:
         return "Broken"
 
+@with_check_lock
 def run_check(auto=False):
+    update_progress("fetching", "Getting forms data...")
     records = get_links_with_meta()
     if not records:
-        print("⚠ No new records fetched; preserving previous data.")
+        update_progress("complete", "No records found")
         return json.load(open(JSON_FILE))["results"] if os.path.exists(JSON_FILE) else []
     
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -179,10 +322,19 @@ def run_check(auto=False):
     old_results = history.get("results", [])
 
     results = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        statuses = list(executor.map(lambda rec: check_link(rec["url"]), records))
-
-    for rec, status in zip(records, statuses):
+    total = len(records)
+    
+    # Sequential processing instead of ThreadPoolExecutor
+    for index, rec in enumerate(records, 1):
+        status = check_link(
+            rec["url"], 
+            index, 
+            total, 
+            rec["department"],
+            rec["title"],
+            rec["lang"]
+        )
+        
         first_broken = None
         if status != "OK":
             prev = next((h for h in old_results if h["url"] == rec["url"] and h["status"] != "OK"), None)
@@ -213,10 +365,8 @@ def run_check(auto=False):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
     pd.DataFrame(results).to_csv(CSV_FILE, index=False)
+    update_progress("complete", "Check completed")
     return results
-
-def background_check():
-    threading.Thread(target=run_check, kwargs={"auto": False}, daemon=True).start()
 
 def background_scheduler():
     while True:
@@ -250,7 +400,6 @@ threading.Thread(target=self_pinger, daemon=True).start()
 @app.route("/")
 def index():
     if not os.path.exists(JSON_FILE):
-        background_check()
         results = []
         last_checked = None
         last_auto_refresh = None
@@ -277,7 +426,7 @@ def index():
 
 @app.route("/refresh")
 def refresh():
-    background_check()
+    run_check()
     return redirect(url_for('index'))
 
 @app.route("/download_csv")
@@ -293,6 +442,23 @@ def download_errors():
     errors_file = f"errors_only_{timestamp}.csv"
     errors.to_csv(errors_file, index=False)
     return send_file(errors_file, as_attachment=True)
+
+@app.route('/progress-stream')
+def progress_stream():
+    def generate():
+        while True:
+            try:
+                # Get progress update with timeout
+                progress_data = progress_queue.get(timeout=30)
+                yield f"data: {json.dumps(progress_data)}\n\n"
+                
+                if progress_data['state'] == 'complete':
+                    break
+            except queue.Empty:
+                # No updates for 30 seconds
+                break
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 # ==== ENTRYPOINT ====
 if __name__ == "__main__":
