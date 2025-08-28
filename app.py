@@ -34,6 +34,32 @@ HTML_TEMPLATE = """
 </head>
 <body class="p-4">
     <h1>Government e-Form Link Status</h1>
+    <div class="row mb-3">
+        <div class="col-sm">
+            <div class="card border-success mb-3">
+            <div class="card-body text-success">
+                <h5 class="card-title">✅ OK </h5>
+                <p class="card-text display-6">{{ ok_count }}</p>
+            </div>
+            </div>
+        </div>
+        <div class="col-sm">
+            <div class="card border-danger mb-3">
+            <div class="card-body text-danger">
+                <h5 class="card-title">❌ Errors / Broken</h5>
+                <p class="card-text display-6">{{ error_count }}</p>
+            </div>
+            </div>
+        </div>
+        <div class="col-sm">
+            <div class="card border-primary mb-3">
+            <div class="card-body text-primary">
+                <h5 class="card-title">🔢 Total Links</h5>
+                <p class="card-text display-6">{{ total_count }}</p>
+            </div>
+            </div>
+        </div>
+    </div>
     <p>Last checked: {{ last_checked or 'N/A' }}</p>
     {% if last_auto_refresh %}
     <p>Last auto-refresh: {{ last_auto_refresh }}</p>
@@ -234,12 +260,19 @@ def index():
         results = data.get("results", [])
         last_checked = data.get("last_checked")
         last_auto_refresh = data.get("last_auto_refresh")
+        
+    ok_count = sum(1 for r in results if r["status"] == "OK")
+    error_count = sum(1 for r in results if r["status"] != "OK")
+    total_count = len(results)
 
     return render_template_string(
         HTML_TEMPLATE,
         results=results,
         last_checked=last_checked,
-        last_auto_refresh=last_auto_refresh
+        last_auto_refresh=last_auto_refresh,
+        ok_count=ok_count,
+        error_count=error_count,
+        total_count=total_count
     )
 
 @app.route("/refresh")
