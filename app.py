@@ -195,6 +195,9 @@ HTML_TEMPLATE = """
             let eventSource;
             
             function startEventSource() {
+				if (eventSource) {
+					eventSource.close();
+				}
                 eventSource = new EventSource('/progress-stream');
                 
                 eventSource.onmessage = function(event) {
@@ -216,8 +219,11 @@ HTML_TEMPLATE = """
                 };
                 
                 eventSource.onerror = function() {
-                    eventSource.close();
-                    $('#progressSection').hide();
+					console.error('EventSource failed:', e);
+					eventSource.close();
+					$('#progressSection').hide();
+					// Try to reconnect after a delay
+					setTimeout(startEventSource, 3000);
                 };
             }
             
@@ -455,8 +461,8 @@ def progress_stream():
                 if progress_data['state'] == 'complete':
                     break
             except queue.Empty:
-                # No updates for 30 seconds
-                break
+                # Send keep-alive ping every 30 seconds
+                yield f"data: {json.dumps({'state': 'idle', 'message': 'waiting...', 'current': 0, 'total': 0})}\n\n"
     
     return Response(generate(), mimetype='text/event-stream')
 
