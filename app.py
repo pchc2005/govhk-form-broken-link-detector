@@ -245,6 +245,12 @@ HTML_TEMPLATE = """
                     }
                 });
             });
+            
+            // Auto‑connect to progress if a check is active
+			{% if is_checking %}
+				$('#progressSection').show();
+				startEventSource();
+			{% endif %}
         });
     </script>
 </body>
@@ -427,11 +433,15 @@ def index():
         last_auto_refresh=last_auto_refresh,
         ok_count=ok_count,
         error_count=error_count,
-        total_count=total_count
+        total_count=total_count,
+    	is_checking=is_checking
     )
 
 @app.route("/refresh")
 def refresh():
+    # Immediate signal for front-end overlay
+    update_progress("starting", "Warming up service...", 0, 0)
+
     run_check()
     return redirect(url_for('index'))
 
@@ -452,18 +462,24 @@ def download_errors():
 @app.route('/progress-stream')
 def progress_stream():
     def generate():
-        while True:
-            try:
-                # Get progress update with timeout
-                progress_data = progress_queue.get(timeout=30)
-                yield f"data: {json.dumps(progress_data)}\n\n"
-                
-                if progress_data['state'] == 'complete':
-                    break
-            except queue.Empty:
-                # Send keep-alive ping every 30 seconds
-                yield f"data: {json.dumps({'state': 'idle', 'message': 'waiting...', 'current': 0, 'total': 0})}\n\n"
-    
+        try:
+            while True:
+                try:
+                    # Wait at most 10s for new progress info
+                    progress_data = progress_queue.get(timeout=10)
+                    yield f"data: {json.dumps(progress_data)}\n\n"
+
+                    if progress_data['state'] == 'complete':
+                        break
+
+                except queue.Empty:
+                    # SSE comment = ignored by JS, keeps connection alive quietly
+                    yield ":keep-alive\n\n"
+
+        except GeneratorExit:
+            # Client disconnected or worker shutting down
+            pass
+
     return Response(generate(), mimetype='text/event-stream')
 
 # ==== ENTRYPOINT ====
