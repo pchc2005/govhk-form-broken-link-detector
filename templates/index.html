@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>Gov e-Form Link Checker</title>
+	<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+	<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+	<link rel="stylesheet" href="https://cdn.datatables.net/1.13.4/css/jquery.dataTables.min.css">
+	<script src="https://cdn.datatables.net/1.13.4/js/jquery.dataTables.min.js"></script>
+
+	<style>
+		.overlay {
+			display: none;
+			position: fixed;
+			top: 0;
+			left: 0;
+			width: 100%;
+			height: 100%;
+			background: rgba(0, 0, 0, 0.5);
+			z-index: 1000;
+		}
+		.progress-popup {
+			position: fixed;
+			top: 50%;
+			left: 50%;
+			transform: translate(-50%, -50%);
+			width: 80%;
+			max-width: 600px;
+			background: white;
+			padding: 20px;
+			border-radius: 8px;
+			box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+			z-index: 1001;
+		}
+		.timestamp-info {
+			position: absolute;
+			top: 10px;
+			right: 20px;
+			text-align: right;
+			font-size: 0.85rem;
+			color: #666;
+		}
+	</style>
+	<meta charset="utf-8">
+</head>
+<body class="p-4">
+	<!-- Progress Overlay -->
+	<div id="progressSection" class="overlay">
+		<div class="progress-popup">
+			<h4 id="progressState">Status: <span id="progressStateText">Idle</span></h4>
+			<p id="progressMessage"></p>
+			<div class="progress">
+				<div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" 
+					 role="progressbar" style="width: 0%"></div>
+			</div>
+		</div>
+	</div>
+
+	<ul class="nav nav-tabs" id="datasetTabs" role="tablist">
+		<li class="nav-item" role="presentation">
+			<button class="nav-link active" id="eforms-tab" data-bs-toggle="tab" data-bs-target="#eforms" type="button" role="tab" aria-controls="eforms" aria-selected="true">
+			E‑Forms
+			</button>
+		</li>
+		<li class="nav-item" role="presentation">
+			<button class="nav-link" id="services-tab" data-bs-toggle="tab" data-bs-target="#services" type="button" role="tab" aria-controls="services">
+			Services
+			</button>
+		</li>
+	</ul>
+
+	<div class="tab-content mt-3">
+		<!-- E‑Forms tab -->
+		<div class="tab-pane fade show active" id="eforms" role="tabpanel" aria-labelledby="eforms-tab">
+			{% set dataset_name = eforms_dataset_name %}
+			{% set ok_count = eforms_ok_count %}
+			{% set error_count = eforms_error_count %}
+			{% set total_count = eforms_total_count %}
+			{% set last_checked = eforms_last_checked %}
+			{% set last_auto_refresh = eforms_last_auto_refresh %}
+			{% set results = eforms_results %}
+			{% include 'dataset_block.html' %}
+		</div>
+
+		<!-- Services tab -->
+		<div class="tab-pane fade" id="services" role="tabpanel" aria-labelledby="services-tab">
+			{% set dataset_name = services_dataset_name %}
+			{% set ok_count = services_ok_count %}
+			{% set error_count = services_error_count %}
+			{% set total_count = services_total_count %}
+			{% set last_checked = services_last_checked %}
+			{% set last_auto_refresh = services_last_auto_refresh %}
+			{% set results = services_results %}
+			{% include 'dataset_block.html' %}
+		</div>
+	</div>
+
+	<script>
+		$(document).ready(function() {
+			// Initialise DataTables for all dataset tables
+			$('[id^="linkTable-"]').each(function() {
+					$(this).DataTable({ order: [[5, 'asc']] });
+			});
+
+			// When a tab is shown, adjust visible DataTables columns
+			$('button[data-bs-toggle="tab"]').on('shown.bs.tab', function () {
+					$.fn.dataTable.tables({ visible: true, api: true }).columns.adjust();
+			});
+
+			let eventSource;
+			
+			function startEventSource() {
+				if (eventSource) {
+					eventSource.close();
+				}
+				eventSource = new EventSource('/progress-stream');
+				
+				eventSource.onmessage = function(event) {
+          const data = JSON.parse(event.data);
+          if (data.state !== 'idle') {
+            $('#progressSection').show();
+
+            // Show dataset label if present
+            const label = data.dataset ? `${data.state} – ${data.dataset}` : data.state;
+            $('#progressStateText').text(label);
+
+            $('#progressMessage').text(data.message);
+
+            if (data.total > 0) {
+                let percentage = (data.current / data.total) * 100;
+                $('#progressBar').css('width', percentage + '%');
+            }
+          }
+
+          if (data.state === 'complete') {
+            eventSource.close();
+            location.reload();
+          }
+        };
+				
+				eventSource.onerror = function() {
+					console.error('EventSource failed:', e);
+					eventSource.close();
+					$('#progressSection').hide();
+					// Try to reconnect after a delay
+					setTimeout(startEventSource, 3000);
+				};
+			}
+			
+			// Start progress tracking when refresh is clicked
+			$('a[href^="/refresh/"]').click(function(e) {
+				e.preventDefault();
+				$('#progressSection').show();
+				$.ajax({
+					url: $(this).attr('href'),
+					method: 'GET',
+					success: function() {
+						startEventSource();
+					},
+					error: function(xhr) {
+						if (xhr.status === 409) {
+							alert('Another check is currently in progress');
+							$('#progressSection').hide();
+						}
+					}
+				});
+			});
+			
+			// Auto‑connect to progress if a check is active
+			{% if is_checking %}
+				$('#progressSection').show();
+				startEventSource();
+			{% endif %}
+		});
+	</script>
+</body>
+</html>

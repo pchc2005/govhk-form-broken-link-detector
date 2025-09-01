@@ -1,0 +1,70 @@
+<!-- Timestamp Info -->
+<div class="timestamp-info">
+  <div>Last checked: {{ last_checked or 'N/A' }}</div>
+  {% if last_auto_refresh %}
+  <div>Last auto-refresh: {{ last_auto_refresh }}</div>
+  {% endif %}
+</div>
+
+<!-- Status Cards -->
+<div class="row mb-3">
+  <div class="col-sm">
+    <div class="card border-success mb-3">
+      <div class="card-body text-success">
+        <h5 class="card-title">✅ OK </h5>
+        <p class="card-text display-6">{{ ok_count }}</p>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm">
+    <div class="card border-danger mb-3">
+      <div class="card-body text-danger">
+        <h5 class="card-title">❌ Errors / Broken</h5>
+        <p class="card-text display-6">{{ error_count }}</p>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm">
+    <div class="card border-primary mb-3">
+      <div class="card-body text-primary">
+        <h5 class="card-title">🔢 Total Links</h5>
+        <p class="card-text display-6">{{ total_count }}</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Buttons -->
+<a href="{{ url_for('refresh', dataset=dataset_name) }}" class="btn btn-primary mb-3">🔄 Refresh</a>
+<a href="{{ url_for('download_csv', dataset=dataset_name) }}" class="btn btn-success mb-3">⬇ Export All (CSV)</a>
+<a href="{{ url_for('download_errors', dataset=dataset_name) }}" class="btn btn-danger mb-3">⬇ Export Errors Only</a>
+
+<!-- Table -->
+<table id="linkTable-{{ dataset_name }}" class="table table-striped table-hover">
+  <thead class="table-dark">
+    <tr>
+      <th>#</th>
+      <th>Department</th>
+      <th>Title</th>
+      <th>Lang</th>
+      <th>URL</th>
+      <th>Status</th>
+      <th>First Broken</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in results %}
+    <tr>
+      <td>{{ loop.index }}</td>
+      <td>{{ row['department'] }}</td>
+      <td>{{ row['title'] }}</td>
+      <td>{{ row['lang'] }}</td>
+      <td><a href="{{ row['url'] }}" target="_blank">{{ row['url'] }}</a></td>
+      <td class="{% if row['status'] == 'OK' %}text-success{% elif row['status'].startswith('Error') or row['status'] == 'Broken' %}text-danger{% else %}text-warning{% endif %}">
+        {{ row['status'] }}
+      </td>
+      <td>{{ row['first_broken'] or '' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
