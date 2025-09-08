@@ -17,6 +17,20 @@
     </div>
   </div>
   <div class="col-sm">
+    <div class="card border-warning mb-3">
+      <div class="card-body text-warning">
+        <h5 class="card-title">
+          ⚠️ Warning
+          <span data-bs-toggle="tooltip" data-bs-placement="top"
+                title="Links that are reachable but have issues such as TLS Legacy Renegotiation Unsupported or SSL verification bypassed.">
+            <i class="bi bi-question-circle-fill" style="cursor: pointer;"></i>
+          </span>
+        </h5>
+        <p class="card-text display-6">{{ warning_count }}</p>
+      </div>
+    </div>
+  </div>
+  <div class="col-sm">
     <div class="card border-danger mb-3">
       <div class="card-body text-danger">
         <h5 class="card-title">❌ Errors / Broken</h5>

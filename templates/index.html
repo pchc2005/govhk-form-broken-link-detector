@@ -3,6 +3,7 @@
 <head>
 	<title>Gov e-Form Link Checker</title>
 	<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
 
 	<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
 	<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -77,6 +78,7 @@
 			{% set dataset_name = eforms_dataset_name %}
 			{% set ok_count = eforms_ok_count %}
 			{% set error_count = eforms_error_count %}
+			{% set warning_count = eforms_warning_count %}
 			{% set total_count = eforms_total_count %}
 			{% set last_checked = eforms_last_checked %}
 			{% set last_auto_refresh = eforms_last_auto_refresh %}
@@ -89,6 +91,7 @@
 			{% set dataset_name = services_dataset_name %}
 			{% set ok_count = services_ok_count %}
 			{% set error_count = services_error_count %}
+			{% set warning_count = services_warning_count %}
 			{% set total_count = services_total_count %}
 			{% set last_checked = services_last_checked %}
 			{% set last_auto_refresh = services_last_auto_refresh %}
@@ -174,6 +177,11 @@
 				startEventSource();
 			{% endif %}
 		});
+		// Enable all tooltips
+		var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
+		tooltipTriggerList.forEach(function (tooltipTriggerEl) {
+			new bootstrap.Tooltip(tooltipTriggerEl)
+		})
 	</script>
 </body>
 </html>

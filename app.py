@@ -1,5 +1,6 @@
 from flask import Flask, render_template, send_file, redirect, url_for, jsonify, Response
 import requests
+from requests.exceptions import SSLError
 from datetime import datetime
 import pandas as pd
 import os
@@ -8,6 +9,7 @@ import threading
 import time
 import queue
 import functools
+import csv
 from threading import Lock
 
 # ==== CONFIG ====
@@ -26,6 +28,10 @@ MAX_WORKERS = 10
 
 SELF_PING_INTERVAL = 600  # seconds (10 minutes)
 SELF_URL = os.environ.get("SELF_URL")  # set in Render dashboard
+
+DEBUG_MODE = False  # Set to False to disable debug logging
+DEBUG_LOG_FILE = "link_check_debug.csv"
+
 
 app = Flask(__name__)
 
@@ -152,18 +158,76 @@ def get_links_with_meta():
 
 def check_link(url, index, total, department, title, lang):
     update_progress("checking", f"Checking {department} - {title} ({lang})", index, total)
-    try:
-        r = requests.head(url, allow_redirects=True, timeout=TIMEOUT)
-        # Some servers don't like HEAD; fall back to GET if needed
-        if r.status_code in (405, 403) or r.status_code >= 400:
-            r = requests.get(url, allow_redirects=True, timeout=TIMEOUT, stream=True)
-            r.close()
-        if r.status_code >= 400:
-            return f"Error {r.status_code}"
-        return "OK"
-    except requests.RequestException:
-        return "Broken"
 
+    def try_request(method, verify=True):
+        try:
+            r = requests.request(method, url, allow_redirects=True, timeout=TIMEOUT, stream=True, verify=verify)
+            status_code = r.status_code
+            r.close()
+            return status_code, None, verify
+        except SSLError as e:
+            err_str = str(e)
+            # Special-case: unsafe legacy renegotiation
+            if "UNSAFE_LEGACY_RENEGOTIATION_DISABLED" in err_str:
+                return None, "TLS Legacy Renegotiation Unsupported", verify
+            # Retry once with verify=False for other SSL errors
+            if verify:
+                try:
+                    r = requests.request(method, url, allow_redirects=True, timeout=TIMEOUT, stream=True, verify=False)
+                    status_code = r.status_code
+                    r.close()
+                    return status_code, f"SSL verify failed, bypassed: {err_str}", False
+                except requests.RequestException as e2:
+                    return None, f"SSL bypass also failed: {e2}", False
+            return None, f"SSL error: {err_str}", verify
+        except requests.RequestException as e:
+            return None, str(e), verify
+
+    head_status, head_error, head_verified = try_request("HEAD")
+    get_status, get_error, get_verified = None, None, True
+
+    # Fall back to GET if HEAD fails or is blocked
+    if head_status is None or head_status in (405, 403) or head_status >= 400:
+        get_status, get_error, get_verified = try_request("GET")
+
+    # Decide final status
+    if head_error == "TLS Legacy Renegotiation Unsupported" or get_error == "TLS Legacy Renegotiation Unsupported":
+        final_status = "TLS Legacy Renegotiation Unsupported"
+    elif head_status is None and get_status is None:
+        final_status = "Broken"
+    else:
+        status_to_use = get_status if get_status is not None else head_status
+        if status_to_use is not None and status_to_use >= 400:
+            if status_to_use in (401, 403):
+                final_status = f"Restricted {status_to_use}"
+            else:
+                final_status = f"Error {status_to_use}"
+        else:
+            final_status = "OK"
+
+    # Debug logging
+    if DEBUG_MODE:
+        try:
+            file_exists = os.path.exists(DEBUG_LOG_FILE)
+            with open(DEBUG_LOG_FILE, 'a', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow([
+                        "timestamp", "department", "title", "lang", "url",
+                        "head_status", "head_error", "head_verified",
+                        "get_status", "get_error", "get_verified",
+                        "final_status"
+                    ])
+                writer.writerow([
+                    datetime.now().isoformat(), department, title, lang, url,
+                    head_status, head_error, head_verified,
+                    get_status, get_error, get_verified,
+                    final_status
+                ])
+        except Exception as e:
+            print(f"[DebugLog] Failed to write debug log: {e}")
+
+    return final_status
 
 @with_check_lock
 def run_check(auto=False, dataset="eforms"):
@@ -264,6 +328,26 @@ def self_pinger():
 		except Exception as e:
 			print(f"[Self‑Pinger] Error: {e}")
 		time.sleep(SELF_PING_INTERVAL)
+  
+def classify_counts(results):
+    ok_count = 0
+    warning_count = 0
+    error_count = 0
+
+    for r in results:
+        status = r["status"]
+
+        # Warnings: TLS issues, SSL bypass, or any other "soft" problems
+        if status.startswith("TLS") or "SSL verify failed" in status or "SSL bypass" in status:
+            warning_count += 1
+        # OK: exactly "OK"
+        elif status == "OK":
+            ok_count += 1
+        # Everything else is an error
+        else:
+            error_count += 1
+
+    return ok_count, warning_count, error_count
 
 # Start scheduler on app init
 threading.Thread(target=background_scheduler, daemon=True).start()
@@ -275,22 +359,27 @@ def index():
     eforms_data = load_history(JSON_FILE)
     services_data = load_history(JSON_FILE_SERVICES)
 
+    eforms_ok_count, eforms_warning_count, eforms_error_count = classify_counts(eforms_data["results"])
+    services_ok_count, services_warning_count, services_error_count = classify_counts(services_data["results"])
+
     return render_template(
         'index.html',
         # E‑Forms data
         eforms_results=eforms_data["results"],
         eforms_last_checked=eforms_data["last_checked"],
         eforms_last_auto_refresh=eforms_data["last_auto_refresh"],
-        eforms_ok_count=sum(1 for r in eforms_data["results"] if r["status"] == "OK"),
-        eforms_error_count=sum(1 for r in eforms_data["results"] if r["status"] != "OK"),
+        eforms_ok_count=eforms_ok_count,
+        eforms_warning_count=eforms_warning_count,
+        eforms_error_count=eforms_error_count,
         eforms_total_count=len(eforms_data["results"]),
 
         # Services data
         services_results=services_data["results"],
         services_last_checked=services_data["last_checked"],
         services_last_auto_refresh=services_data["last_auto_refresh"],
-        services_ok_count=sum(1 for r in services_data["results"] if r["status"] == "OK"),
-        services_error_count=sum(1 for r in services_data["results"] if r["status"] != "OK"),
+        services_ok_count=services_ok_count,
+        services_error_count=services_error_count,
+        services_warning_count=services_warning_count,
         services_total_count=len(services_data["results"]),
 
         # Global flags
