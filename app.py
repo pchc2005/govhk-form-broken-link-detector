@@ -82,7 +82,7 @@ def get_services_with_meta():
 	for attempt in range(3):
 		try:
 			resp = requests.get(SERVICES_URL, timeout=TIMEOUT)
-			resp.encoding = 'utf-8'  # force correct decoding
+			resp.encoding = 'utf-8-sig'  # force correct decoding
 			resp.raise_for_status()
 			items = resp.json()
 			if not isinstance(items, list) or not items:
@@ -117,7 +117,7 @@ def get_links_with_meta():
 		try:
 			print(f"Fetching forms, attempt {attempt+1}...")
 			resp = requests.get(EFORM_URL, timeout=15)
-			resp.encoding = 'utf-8'  # force correct decoding
+			resp.encoding = 'utf-8-sig'  # force correct decoding
 			resp.raise_for_status()
 			forms = resp.json()  # Will raise ValueError if invalid
 			if not isinstance(forms, list) or not forms:
@@ -170,6 +170,11 @@ def check_link(url, index, total, department, title, lang):
             # Special-case: unsafe legacy renegotiation
             if "UNSAFE_LEGACY_RENEGOTIATION_DISABLED" in err_str:
                 return None, "TLS Legacy Renegotiation Unsupported", verify
+            
+            # Special-case: handshake failure
+            if "SSLV3_ALERT_HANDSHAKE_FAILURE" in err_str:
+                return None, "TLS Handshake Failure", verify
+            
             # Retry once with verify=False for other SSL errors
             if verify:
                 try:
@@ -337,13 +342,20 @@ def classify_counts(results):
     for r in results:
         status = r["status"]
 
-        # Warnings: TLS issues, SSL bypass, or any other "soft" problems
-        if status.startswith("TLS") or "SSL verify failed" in status or "SSL bypass" in status:
+        # --- Warnings ---
+        # Any TLS-level incompatibility or SSL bypass
+        if (
+            status.startswith("TLS")  # e.g. TLS Legacy Renegotiation Unsupported, TLS Handshake Failure
+            or "SSL verify failed" in status
+            or "SSL bypass" in status
+        ):
             warning_count += 1
-        # OK: exactly "OK"
+
+        # --- OK ---
         elif status == "OK":
             ok_count += 1
-        # Everything else is an error
+
+        # --- Errors ---
         else:
             error_count += 1
 
